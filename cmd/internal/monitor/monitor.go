@@ -13,6 +13,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const (
+	SidebarWidth = 18
+	ContentWidth = 58
+)
+
 type Process struct {
 	PID    int
 	Name   string
@@ -35,6 +40,12 @@ type Container struct {
 	Ports  string
 }
 
+type SubView struct {
+	Name        string
+	Key         string
+	Description string
+}
+
 type Model struct {
 	processes  []Process
 	ports      []Port
@@ -49,50 +60,75 @@ type Model struct {
 	portTable table.Model
 	contTable table.Model
 
+	subViews     []SubView
 	selectedView int
-	ready        bool
-	width        int
-	height       int
+
+	ready  bool
+	width  int
+	height int
 
 	refreshing bool
+	hasScanned bool
 	lastUpdate time.Time
 }
 
 var (
 	colors = struct {
-		accent  lipgloss.Color
-		success lipgloss.Color
-		warning lipgloss.Color
-		error   lipgloss.Color
-		info    lipgloss.Color
-		subtle  lipgloss.Color
-		surface lipgloss.Color
+		background  lipgloss.Color
+		surface     lipgloss.Color
+		primary     lipgloss.Color
+		accent      lipgloss.Color
+		success     lipgloss.Color
+		warning     lipgloss.Color
+		error       lipgloss.Color
+		info        lipgloss.Color
+		textPrimary lipgloss.Color
+		textSubtle  lipgloss.Color
 	}{
-		accent:  lipgloss.Color("86"),
-		success: lipgloss.Color("76"),
-		warning: lipgloss.Color("226"),
-		error:   lipgloss.Color("196"),
-		info:    lipgloss.Color("75"),
-		subtle:  lipgloss.Color("241"),
-		surface: lipgloss.Color("236"),
+		background:  lipgloss.Color("232"),
+		surface:     lipgloss.Color("235"),
+		primary:     lipgloss.Color("45"),
+		accent:      lipgloss.Color("219"),
+		success:     lipgloss.Color("46"),
+		warning:     lipgloss.Color("208"),
+		error:       lipgloss.Color("196"),
+		info:        lipgloss.Color("75"),
+		textPrimary: lipgloss.Color("254"),
+		textSubtle:  lipgloss.Color("244"),
 	}
 
-	headerStyle = lipgloss.NewStyle().
+	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colors.accent)
+			Foreground(colors.primary).
+			Align(lipgloss.Center)
 
-	tabActiveStyle = lipgloss.NewStyle().
-			Foreground(colors.accent).
-			Bold(true).
-			Padding(0, 1)
+	subtitleStyle = lipgloss.NewStyle().
+			Foreground(colors.textSubtle).
+			Align(lipgloss.Center)
 
-	tabInactiveStyle = lipgloss.NewStyle().
-				Foreground(colors.subtle).
-				Padding(0, 1)
+	infoStyle = lipgloss.NewStyle().
+			Foreground(colors.info).
+			Align(lipgloss.Center)
+
+	successStyle = lipgloss.NewStyle().
+			Foreground(colors.success)
+
+	warningStyle = lipgloss.NewStyle().
+			Foreground(colors.warning)
+
+	boxStyle = lipgloss.NewStyle().
+			Foreground(colors.surface)
 )
 
 func NewModel() Model {
-	m := Model{}
+	m := Model{
+		subViews: []SubView{
+			{"Processes", "1", "Running processes"},
+			{"Ports", "2", "Open ports"},
+			{"Containers", "3", "Docker"},
+		},
+		selectedView: 0,
+	}
 
 	procColumns := []table.Column{
 		{Title: " PID ", Width: 8},
@@ -101,7 +137,10 @@ func NewModel() Model {
 		{Title: " MEM% ", Width: 8},
 		{Title: " Status ", Width: 12},
 	}
-	m.procTable = table.New(table.WithColumns(procColumns))
+	m.procTable = table.New(
+		table.WithColumns(procColumns),
+		table.WithFocused(true),
+	)
 
 	portColumns := []table.Column{
 		{Title: " Port ", Width: 8},
@@ -109,15 +148,20 @@ func NewModel() Model {
 		{Title: " State ", Width: 12},
 		{Title: " Process ", Width: 20},
 	}
-	m.portTable = table.New(table.WithColumns(portColumns))
+	m.portTable = table.New(
+		table.WithColumns(portColumns),
+		table.WithFocused(true),
+	)
 
 	contColumns := []table.Column{
 		{Title: " Name ", Width: 25},
 		{Title: " Status ", Width: 15},
 		{Title: " Image ", Width: 28},
-		{Title: " Ports ", Width: 15},
 	}
-	m.contTable = table.New(table.WithColumns(contColumns))
+	m.contTable = table.New(
+		table.WithColumns(contColumns),
+		table.WithFocused(true),
+	)
 
 	return m
 }
@@ -136,6 +180,7 @@ func (m *Model) Refresh() {
 	m.updateTables()
 	m.lastUpdate = time.Now()
 	m.refreshing = false
+	m.hasScanned = true
 }
 
 func (m *Model) collectSystemInfo() {
@@ -158,52 +203,12 @@ func getCPUUsage() float64 {
 	if err != nil {
 		return 0
 	}
-
 	cpu, _ := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
 	return cpu
 }
 
-func (m *Model) collectProcesses() {
-	m.processes = []Process{}
-
-	cmd := exec.Command("ps", "aux")
-	out, err := cmd.Output()
-	if err != nil {
-		return
-	}
-
-	lines := strings.Split(string(out), "\n")
-	for i, line := range lines {
-		if i == 0 || len(line) == 0 {
-			continue
-		}
-
-		parts := strings.Fields(line)
-		if len(parts) < 11 {
-			continue
-		}
-
-		pid, _ := strconv.Atoi(parts[1])
-		cpu, _ := strconv.ParseFloat(parts[2], 64)
-		mem, _ := strconv.ParseFloat(parts[3], 64)
-
-		m.processes = append(m.processes, Process{
-			PID:    pid,
-			Name:   parts[10],
-			CPU:    cpu,
-			Mem:    mem,
-			Status: parts[7],
-		})
-
-		if len(m.processes) > 50 {
-			break
-		}
-	}
-}
-
 func (m *Model) collectPorts() {
 	m.ports = []Port{}
-
 	cmd := exec.Command("ss", "-tulpn")
 	out, err := cmd.Output()
 	if err != nil {
@@ -215,107 +220,88 @@ func (m *Model) collectPorts() {
 		if i == 0 || len(line) == 0 {
 			continue
 		}
-
 		parts := strings.Fields(line)
 		if len(parts) < 5 {
 			continue
 		}
-
 		var port int
 		fmt.Sscanf(parts[4], ":%d", &port)
-
 		state := "LISTEN"
 		if len(parts) > 4 {
 			state = parts[1]
 		}
-
 		process := ""
 		if len(parts) > 6 {
 			process = parts[6]
 		}
-
-		m.ports = append(m.ports, Port{
-			Port:    port,
-			Proto:   parts[0],
-			State:   state,
-			Process: process,
-		})
+		m.ports = append(m.ports, Port{Port: port, Proto: parts[0], State: state, Process: process})
 	}
 }
 
 func (m *Model) collectContainers() {
 	m.containers = []Container{}
-
-	cmd := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}")
+	cmd := exec.Command("docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}")
 	out, err := cmd.Output()
 	if err != nil {
 		return
 	}
-
 	lines := strings.Split(string(out), "\n")
 	for _, line := range lines {
 		if len(line) == 0 {
 			continue
 		}
-
 		parts := strings.Split(line, "\t")
-		if len(parts) < 3 {
-			continue
+		if len(parts) >= 3 {
+			m.containers = append(m.containers, Container{Name: parts[0], Status: parts[1], Image: parts[2]})
 		}
-
-		ports := ""
-		if len(parts) > 3 {
-			ports = parts[3]
-		}
-
-		m.containers = append(m.containers, Container{
-			Name:   parts[0],
-			Status: parts[1],
-			Image:  parts[2],
-			Ports:  ports,
-		})
 	}
 }
 
 func (m *Model) updateTables() {
-	m.collectProcesses()
+	cmd := exec.Command("ps", "aux")
+	out, _ := cmd.Output()
+	lines := strings.Split(string(out), "\n")
+
+	m.processes = []Process{}
+	for i, line := range lines {
+		if i == 0 || len(line) == 0 {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 11 {
+			continue
+		}
+		pid, _ := strconv.Atoi(parts[1])
+		cpu, _ := strconv.ParseFloat(parts[2], 64)
+		mem, _ := strconv.ParseFloat(parts[3], 64)
+		m.processes = append(m.processes, Process{PID: pid, Name: parts[10], CPU: cpu, Mem: mem, Status: parts[7]})
+		if len(m.processes) > 20 {
+			break
+		}
+	}
 
 	var procRows []table.Row
-	for _, p := range m.processes[:minInt(20, len(m.processes))] {
+	for _, p := range m.processes {
 		status := p.Status
 		if p.CPU > 80 {
-			status = lipgloss.NewStyle().Foreground(colors.warning).Render(p.Status)
-		} else if p.Mem > 80 {
-			status = lipgloss.NewStyle().Foreground(colors.error).Render(p.Status)
+			status = warningStyle.Render(p.Status)
 		}
-
-		cpuStr := fmt.Sprintf("%.1f", p.CPU)
-		if p.CPU > 80 {
-			cpuStr = lipgloss.NewStyle().Foreground(colors.warning).Render(cpuStr)
-		}
-
-		memStr := fmt.Sprintf("%.1f", p.Mem)
-		if p.Mem > 80 {
-			memStr = lipgloss.NewStyle().Foreground(colors.error).Render(memStr)
-		}
-
 		procRows = append(procRows, table.Row{
 			fmt.Sprintf("%d", p.PID),
 			truncate(p.Name, 26),
-			cpuStr,
-			memStr,
+			fmt.Sprintf("%.1f", p.CPU),
+			fmt.Sprintf("%.1f", p.Mem),
 			status,
 		})
 	}
 	m.procTable.SetRows(procRows)
 
 	var portRows []table.Row
-	for _, p := range m.ports[:minInt(20, len(m.ports))] {
+	for _, p := range m.ports[:20] {
 		stateStr := p.State
 		if p.State == "LISTEN" {
-			stateStr = lipgloss.NewStyle().Foreground(colors.success).Render(p.State)
+			stateStr = successStyle.Render(p.State)
 		}
-
 		portRows = append(portRows, table.Row{
 			fmt.Sprintf("%d", p.Port),
 			p.Proto,
@@ -329,15 +315,9 @@ func (m *Model) updateTables() {
 	for _, c := range m.containers {
 		status := c.Status
 		if !strings.Contains(c.Status, "Up") {
-			status = lipgloss.NewStyle().Foreground(colors.warning).Render(c.Status)
+			status = warningStyle.Render(c.Status)
 		}
-
-		contRows = append(contRows, table.Row{
-			c.Name,
-			status,
-			truncate(c.Image, 26),
-			truncate(c.Ports, 13),
-		})
+		contRows = append(contRows, table.Row{c.Name, status, truncate(c.Image, 26)})
 	}
 	m.contTable.SetRows(contRows)
 }
@@ -350,60 +330,52 @@ func truncate(s string, maxLen int) string {
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.SetSize(msg.Width, msg.Height)
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "j", "down":
-			m.selectedView = (m.selectedView + 1) % 3
-		case "k", "up":
-			m.selectedView = (m.selectedView - 1 + 3) % 3
+		case "1":
+			m.selectedView = 0
+		case "2":
+			m.selectedView = 1
+		case "3":
+			m.selectedView = 2
+		case "j", "down", "right":
+			m.selectedView = (m.selectedView + 1) % len(m.subViews)
+		case "k", "up", "left":
+			m.selectedView = (m.selectedView - 1 + len(m.subViews)) % len(m.subViews)
 		case "r", "ctrl+r":
 			m.Refresh()
 		}
+
+		switch m.selectedView {
+		case 0:
+			m.procTable, cmd = m.procTable.Update(msg)
+		case 1:
+			m.portTable, cmd = m.portTable.Update(msg)
+		case 2:
+			m.contTable, cmd = m.contTable.Update(msg)
+		}
 	}
 
-	return m, nil
+	return m, cmd
 }
 
 func (m Model) View() string {
-	header := headerStyle.Render("⚡ Runtime Monitor")
+	header := titleStyle.Render("⚡ Runtime")
 
-	cpuStr := fmt.Sprintf("%.1f%%", m.cpuPercent)
-	memStr := fmt.Sprintf("%.1f%% (%.1fMB / %.1fMB)", m.memPercent,
-		float64(m.memUsed)/1024/1024, float64(m.memTotal)/1024/1024)
+	cpuBar := m.renderProgressBar(m.cpuPercent, 12)
+	memBar := m.renderProgressBar(m.memPercent, 12)
 
-	cpuColor := colors.success
-	if m.cpuPercent > 70 {
-		cpuColor = colors.warning
-	}
-	if m.cpuPercent > 90 {
-		cpuColor = colors.error
-	}
-
-	memColor := colors.success
-	if m.memPercent > 70 {
-		memColor = colors.warning
-	}
-	if m.memPercent > 90 {
-		memColor = colors.error
-	}
-
-	statsBar := fmt.Sprintf("CPU: %s  |  Memory: %s  |  Last: %s",
-		lipgloss.NewStyle().Foreground(cpuColor).Render(cpuStr),
-		lipgloss.NewStyle().Foreground(memColor).Render(memStr),
-		m.lastUpdate.Format("15:04:05"))
-
-	views := []string{"Processes", "Ports", "Containers"}
-	viewIndicator := ""
-	for i, v := range views {
-		if i == m.selectedView {
-			viewIndicator += tabActiveStyle.Render(" "+v+" ") + " "
-		} else {
-			viewIndicator += tabInactiveStyle.Render(" "+v+" ") + " "
-		}
+	statsBar := ""
+	if m.hasScanned {
+		statsBar = subtitleStyle.Render(fmt.Sprintf("CPU %s  |  Memory %s  |  %s", cpuBar, memBar, m.lastUpdate.Format("15:04:05")))
+	} else {
+		statsBar = infoStyle.Render("Press [r] to fetch metrics")
 	}
 
 	var content string
@@ -416,14 +388,65 @@ func (m Model) View() string {
 		content = m.contTable.View()
 	}
 
-	hint := lipgloss.NewStyle().Foreground(colors.info).Render("\nPress 'r' to refresh | j/k to switch views")
+	mainContent := fmt.Sprintf("%s\n%s\n%s\n%s", header, statsBar, content, subtitleStyle.Render("[1]/[2]/[3]: view  ↑/↓: select  r: refresh"))
 
-	return fmt.Sprintf("%s\n%s\n\n%s\n\n%s\n%s\n", header, statsBar, viewIndicator, content, hint)
+	return mainContent
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
+func (m Model) renderProgressBar(percent float64, width int) string {
+	filled := int(percent / 100 * float64(width))
+	if filled > width {
+		filled = width
 	}
-	return b
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	color := colors.success
+	if percent > 70 {
+		color = colors.warning
+	}
+	if percent > 90 {
+		color = colors.error
+	}
+	return lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("[%s]%.0f%%", bar, percent))
+}
+
+func (m Model) renderNav() string {
+	s := strings.Builder{}
+
+	for i, v := range m.subViews {
+		indicator := " "
+		if i == m.selectedView {
+			indicator = "▶"
+		}
+
+		key := lipgloss.NewStyle().Foreground(colors.info).Render("[" + v.Key + "]")
+		content := ""
+		if i == m.selectedView {
+			content = lipgloss.NewStyle().Foreground(colors.primary).Bold(true).Render(" " + indicator + " " + key + " " + v.Name)
+		} else {
+			content = lipgloss.NewStyle().Foreground(colors.textSubtle).Render(" " + indicator + " " + key + " " + v.Name)
+		}
+
+		s.WriteString(content)
+		s.WriteString("\n")
+
+		descContent := lipgloss.NewStyle().Foreground(colors.textSubtle).Render("   " + v.Description)
+		s.WriteString(descContent)
+		s.WriteString("\n")
+	}
+
+	return s.String()
+}
+
+func stripAnsi(s string) string {
+	result := ""
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\x1b' {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		result += string(s[i])
+	}
+	return result
 }

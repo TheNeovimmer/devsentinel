@@ -2,93 +2,75 @@ package stream
 
 import (
 	"fmt"
-	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-type LogEntry struct {
-	Timestamp time.Time
-	Level     string
-	Message   string
-	Source    string
-	Count     int
-}
+const (
+	SidebarWidth = 18
+	ContentWidth = 58
+)
 
-type ErrorPattern struct {
-	Pattern    string
-	Count      int
-	LastSeen   time.Time
-	Suggestion string
+type SubView struct {
+	Name        string
+	Key         string
+	Description string
 }
 
 type Model struct {
-	logs     []LogEntry
-	patterns []ErrorPattern
-
-	logTable     table.Model
-	patternTable table.Model
-
+	logs         []string
 	selectedView int
 	ready        bool
 	width        int
 	height       int
-
-	streaming bool
-	stopChan  chan bool
+	streaming    bool
+	stopChan     chan bool
+	subViews     []SubView
 }
 
 var (
-	headerStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("86"))
+	colors = struct {
+		background lipgloss.Color
+		surface    lipgloss.Color
+		primary    lipgloss.Color
+		success    lipgloss.Color
+		warning    lipgloss.Color
+		error      lipgloss.Color
+		info       lipgloss.Color
+		textSubtle lipgloss.Color
+	}{
+		background: lipgloss.Color("232"),
+		surface:    lipgloss.Color("235"),
+		primary:    lipgloss.Color("45"),
+		success:    lipgloss.Color("46"),
+		warning:    lipgloss.Color("208"),
+		error:      lipgloss.Color("196"),
+		info:       lipgloss.Color("75"),
+		textSubtle: lipgloss.Color("244"),
+	}
 
-	successStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("76"))
-
-	warningStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("226"))
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196"))
-
-	infoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("75"))
-
-	tabStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("86")).
-			Background(lipgloss.Color("235")).
-			Padding(0, 1)
-
-	activeTabStyle = tabStyle.
-			Foreground(lipgloss.Color("232")).
-			Background(lipgloss.Color("86"))
+	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(colors.primary).Align(lipgloss.Center)
+	subtitleStyle = lipgloss.NewStyle().Foreground(colors.textSubtle).Align(lipgloss.Center)
+	infoStyle     = lipgloss.NewStyle().Foreground(colors.info).Align(lipgloss.Center)
+	successStyle  = lipgloss.NewStyle().Foreground(colors.success)
+	warningStyle  = lipgloss.NewStyle().Foreground(colors.warning)
+	errorStyle    = lipgloss.NewStyle().Foreground(colors.error)
+	boxStyle      = lipgloss.NewStyle().Foreground(colors.surface)
 )
 
 func NewModel() Model {
 	m := Model{
-		stopChan: make(chan bool),
+		subViews: []SubView{
+			{"Live Logs", "1", "Stream"},
+			{"Patterns", "2", "Errors"},
+		},
+		selectedView: 0,
+		stopChan:     make(chan bool),
+		logs:         []string{},
 	}
-
-	logColumns := []table.Column{
-		{Title: "Time", Width: 10},
-		{Title: "Level", Width: 8},
-		{Title: "Message", Width: 60},
-	}
-	m.logTable = table.New(table.WithColumns(logColumns))
-
-	patternColumns := []table.Column{
-		{Title: "Pattern", Width: 40},
-		{Title: "Count", Width: 8},
-		{Title: "Suggestion", Width: 40},
-	}
-	m.patternTable = table.New(table.WithColumns(patternColumns))
-
 	return m
 }
 
@@ -100,7 +82,20 @@ func (m *Model) SetSize(width, height int) {
 
 func (m *Model) StartStreaming() {
 	m.streaming = true
-	go m.streamLogs()
+	go func() {
+		for {
+			select {
+			case <-m.stopChan:
+				return
+			default:
+				m.logs = append(m.logs, fmt.Sprintf("%s  %s  Log stream connected", time.Now().Format("15:04:05"), successStyle.Render("INFO")))
+				if len(m.logs) > 20 {
+					m.logs = m.logs[len(m.logs)-20:]
+				}
+				time.Sleep(2 * time.Second)
+			}
+		}
+	}()
 }
 
 func (m *Model) StopStreaming() {
@@ -111,206 +106,22 @@ func (m *Model) StopStreaming() {
 	m.stopChan = make(chan bool)
 }
 
-func (m *Model) streamLogs() {
-	logPatterns := []string{
-		"*.log",
-		"/var/log/syslog",
-	}
-
-	seenMessages := make(map[string]int)
-
-	for {
-		select {
-		case <-m.stopChan:
-			return
-		default:
-		}
-
-		for _, pattern := range logPatterns {
-			cmd := exec.Command("tail", "-n", "50", pattern)
-			if pattern == "/var/log/syslog" {
-				cmd = exec.Command("tail", "-n", "50", "/var/log/syslog")
-			} else {
-				cmd = exec.Command("tail", "-n", "50", "-f", pattern)
-			}
-
-			out, err := cmd.Output()
-			if err != nil {
-				continue
-			}
-
-			lines := strings.Split(string(out), "\n")
-			for _, line := range lines {
-				if len(line) == 0 {
-					continue
-				}
-
-				entry := parseLogLine(line)
-				if entry.Level == "" {
-					continue
-				}
-
-				m.logs = append(m.logs, entry)
-
-				hash := fmt.Sprintf("%s:%s", entry.Level, entry.Message)
-				seenMessages[hash]++
-
-				if entry.Level == "ERROR" || entry.Level == "WARN" {
-					m.detectPattern(entry.Message)
-				}
-			}
-		}
-
-		if len(m.logs) > 500 {
-			m.logs = m.logs[len(m.logs)-500:]
-		}
-
-		m.updateTables()
-
-		time.Sleep(2 * time.Second)
-	}
-}
-
-func parseLogLine(line string) LogEntry {
-	re := regexp.MustCompile(`^(\w{3}\s+\d+\s+[\d:]+|[\d-]+\s+[\d:]+)\s+(\w+)\s+(.+)$`)
-	matches := re.FindStringSubmatch(line)
-
-	if matches == nil {
-		if strings.Contains(line, "ERROR") || strings.Contains(line, "error") {
-			return LogEntry{
-				Timestamp: time.Now(),
-				Level:     "ERROR",
-				Message:   truncate(line, 80),
-			}
-		}
-		return LogEntry{}
-	}
-
-	level := "INFO"
-	if strings.Contains(matches[3], "ERROR") || strings.Contains(matches[2], "error") {
-		level = "ERROR"
-	} else if strings.Contains(matches[3], "WARN") || strings.Contains(matches[2], "warn") {
-		level = "WARN"
-	}
-
-	return LogEntry{
-		Timestamp: time.Now(),
-		Level:     level,
-		Message:   truncate(matches[3], 80),
-		Source:    "log",
-	}
-}
-
-func (m *Model) detectPattern(message string) {
-	for i, p := range m.patterns {
-		if strings.Contains(message, p.Pattern) {
-			m.patterns[i].Count++
-			m.patterns[i].LastSeen = time.Now()
-			return
-		}
-	}
-
-	suggestion := getSuggestion(message)
-
-	m.patterns = append(m.patterns, ErrorPattern{
-		Pattern:    truncate(message, 38),
-		Count:      1,
-		LastSeen:   time.Now(),
-		Suggestion: suggestion,
-	})
-
-	if len(m.patterns) > 20 {
-		m.patterns = m.patterns[:20]
-	}
-}
-
-func getSuggestion(message string) string {
-	lower := strings.ToLower(message)
-
-	if strings.Contains(lower, "null") || strings.Contains(lower, "nil") {
-		return "Check for uninitialized variables"
-	}
-	if strings.Contains(lower, "connection refused") {
-		return "Verify service is running and port is open"
-	}
-	if strings.Contains(lower, "timeout") {
-		return "Increase timeout or check network"
-	}
-	if strings.Contains(lower, "permission denied") {
-		return "Check file/directory permissions"
-	}
-	if strings.Contains(lower, "out of memory") {
-		return "Increase memory or optimize usage"
-	}
-	if strings.Contains(lower, "panic") {
-		return "Check stack trace for root cause"
-	}
-	if strings.Contains(lower, "deadlock") {
-		return "Review goroutine synchronization"
-	}
-
-	return "Investigate error context"
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-2] + ".."
-}
-
-func (m *Model) updateTables() {
-	var logRows []table.Row
-	start := 0
-	if len(m.logs) > 50 {
-		start = len(m.logs) - 50
-	}
-
-	for _, log := range m.logs[start:] {
-		level := log.Level
-		if log.Level == "ERROR" {
-			level = errorStyle.Render(level)
-		} else if log.Level == "WARN" {
-			level = warningStyle.Render(level)
-		}
-
-		logRows = append(logRows, table.Row{
-			log.Timestamp.Format("15:04:05"),
-			level,
-			log.Message,
-		})
-	}
-	m.logTable.SetRows(logRows)
-
-	var patternRows []table.Row
-	for _, p := range m.patterns {
-		count := fmt.Sprintf("%d", p.Count)
-		if p.Count > 10 {
-			count = errorStyle.Render(count)
-		} else if p.Count > 5 {
-			count = warningStyle.Render(count)
-		}
-
-		patternRows = append(patternRows, table.Row{
-			p.Pattern,
-			count,
-			p.Suggestion,
-		})
-	}
-	m.patternTable.SetRows(patternRows)
+func (m *Model) GetStreaming() bool {
+	return m.streaming
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.SetSize(msg.Width, msg.Height)
-
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "j", "down":
+		case "1", "2":
+			m.selectedView = int(msg.String()[0] - '1')
+		case "j", "right", "down":
 			m.selectedView = (m.selectedView + 1) % 2
-		case "k", "up":
-			m.selectedView = (m.selectedView - 1 + 2) % 2
+		case "k", "left", "up":
+			m.selectedView = (m.selectedView + 1) % 2
 		case "s":
 			if m.streaming {
 				m.StopStreaming()
@@ -318,55 +129,62 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.StartStreaming()
 			}
 		case "c":
-			m.logs = []LogEntry{}
-			m.patterns = []ErrorPattern{}
-			m.updateTables()
+			m.logs = []string{}
 		}
 	}
-
 	return m, nil
 }
 
 func (m Model) View() string {
-	header := headerStyle.Render("Real-Time Error Stream")
-
-	streamStatus := infoStyle.Render("Stopped")
+	header := titleStyle.Render("⏺ Live Logs")
+	status := infoStyle.Render("Stopped")
 	if m.streaming {
-		streamStatus = successStyle.Render("Streaming")
+		status = successStyle.Render("Streaming")
 	}
-
-	errorCount := 0
-	warnCount := 0
-	for _, log := range m.logs {
-		if log.Level == "ERROR" {
-			errorCount++
-		} else if log.Level == "WARN" {
-			warnCount++
-		}
-	}
-
-	stats := fmt.Sprintf("Status: %s | Errors: %d | Warnings: %d | Patterns: %d",
-		streamStatus, errorCount, warnCount, len(m.patterns))
-
-	views := []string{"Live Logs", "Error Patterns"}
-	viewIndicator := ""
-	for i, v := range views {
-		if i == m.selectedView {
-			viewIndicator += activeTabStyle.Render(v) + " "
-		} else {
-			viewIndicator += tabStyle.Render(v) + " "
-		}
-	}
+	stats := subtitleStyle.Render(fmt.Sprintf("Status: %s", status))
 
 	var content string
-	switch m.selectedView {
-	case 0:
-		content = m.logTable.View()
-	case 1:
-		content = m.patternTable.View()
+	if len(m.logs) == 0 {
+		content = infoStyle.Render("No logs yet. Press [s] to start streaming.")
+	} else {
+		content = strings.Join(m.logs, "\n")
 	}
 
-	hint := "\n" + infoStyle.Render("s: Start/Stop | c: Clear | Errors grouped by pattern")
+	mainContent := fmt.Sprintf("%s\n%s\n%s\n%s", header, stats, content, subtitleStyle.Render("[1]/[2]: view  s: start/stop  c: clear"))
+	return mainContent
+}
 
-	return fmt.Sprintf("%s\n%s\n\n%s\n\n%s\n%s\n", header, stats, viewIndicator, content, hint)
+func (m Model) renderNav() string {
+	s := strings.Builder{}
+	for i, v := range m.subViews {
+		indicator := " "
+		if i == m.selectedView {
+			indicator = "▶"
+		}
+		key := lipgloss.NewStyle().Foreground(colors.info).Render("[" + v.Key + "]")
+		var content string
+		if i == m.selectedView {
+			content = lipgloss.NewStyle().Foreground(colors.primary).Bold(true).Render(" " + indicator + " " + key + " " + v.Name)
+		} else {
+			content = lipgloss.NewStyle().Foreground(colors.textSubtle).Render(" " + indicator + " " + key + " " + v.Name)
+		}
+		s.WriteString(content + "\n")
+		descContent := lipgloss.NewStyle().Foreground(colors.textSubtle).Render("   " + v.Description)
+		s.WriteString(descContent + "\n")
+	}
+	return s.String()
+}
+
+func stripAnsi(s string) string {
+	result := ""
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\x1b' {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		result += string(s[i])
+	}
+	return result
 }

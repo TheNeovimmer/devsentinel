@@ -6,15 +6,18 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+)
+
+const (
+	SidebarWidth = 18
+	ContentWidth = 58
 )
 
 type Complexity struct {
@@ -24,92 +27,76 @@ type Complexity struct {
 	Line       int
 }
 
-type DepSize struct {
-	Name     string
-	Version  string
-	Bytes    int64
-	Indirect bool
-}
-
-type SecurityVuln struct {
-	Package    string
-	Severity   string
-	Title      string
-	FixVersion string
+type SubView struct {
+	Name        string
+	Key         string
+	Description string
 }
 
 type Model struct {
-	complexities    []Complexity
-	depSizes        []DepSize
-	vulnerabilities []SecurityVuln
-	bundleSize      int64
-
-	compTable table.Model
-	depTable  table.Model
-	vulnTable table.Model
-
+	complexities []Complexity
+	compTable    table.Model
+	depTable     table.Model
+	subViews     []SubView
 	selectedView int
 	ready        bool
 	width        int
 	height       int
-
-	scanning bool
+	scanning     bool
+	hasScanned   bool
 }
 
 var (
-	headerStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("86"))
+	colors = struct {
+		background lipgloss.Color
+		surface    lipgloss.Color
+		primary    lipgloss.Color
+		success    lipgloss.Color
+		warning    lipgloss.Color
+		error      lipgloss.Color
+		info       lipgloss.Color
+		textSubtle lipgloss.Color
+	}{
+		background: lipgloss.Color("232"),
+		surface:    lipgloss.Color("235"),
+		primary:    lipgloss.Color("45"),
+		success:    lipgloss.Color("46"),
+		warning:    lipgloss.Color("208"),
+		error:      lipgloss.Color("196"),
+		info:       lipgloss.Color("75"),
+		textSubtle: lipgloss.Color("244"),
+	}
 
-	successStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("76"))
-
-	warningStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("226"))
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196"))
-
-	infoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("75"))
-
-	tabStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("86")).
-			Background(lipgloss.Color("235")).
-			Padding(0, 1)
-
-	activeTabStyle = tabStyle.
-			Foreground(lipgloss.Color("232")).
-			Background(lipgloss.Color("86"))
+	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(colors.primary).Align(lipgloss.Center)
+	subtitleStyle = lipgloss.NewStyle().Foreground(colors.textSubtle).Align(lipgloss.Center)
+	infoStyle     = lipgloss.NewStyle().Foreground(colors.info).Align(lipgloss.Center)
+	successStyle  = lipgloss.NewStyle().Foreground(colors.success)
+	warningStyle  = lipgloss.NewStyle().Foreground(colors.warning)
+	errorStyle    = lipgloss.NewStyle().Foreground(colors.error)
+	boxStyle      = lipgloss.NewStyle().Foreground(colors.surface)
 )
 
 func NewModel() Model {
-	m := Model{}
-
-	compColumns := []table.Column{
-		{Title: "File", Width: 30},
-		{Title: "Function", Width: 25},
-		{Title: "Complexity", Width: 12},
-		{Title: "Line", Width: 8},
+	m := Model{
+		subViews: []SubView{
+			{"Complexity", "1", "Cyclomatic"},
+			{"Dependencies", "2", "Packages"},
+			{"Security", "3", "Vulns"},
+		},
+		selectedView: 0,
 	}
-	m.compTable = table.New(table.WithColumns(compColumns))
-
-	depColumns := []table.Column{
-		{Title: "Package", Width: 35},
-		{Title: "Version", Width: 15},
-		{Title: "Size", Width: 12},
-		{Title: "Type", Width: 10},
-	}
-	m.depTable = table.New(table.WithColumns(depColumns))
-
-	vulnColumns := []table.Column{
-		{Title: "Package", Width: 25},
-		{Title: "Severity", Width: 12},
-		{Title: "Title", Width: 40},
-		{Title: "Fix", Width: 10},
-	}
-	m.vulnTable = table.New(table.WithColumns(vulnColumns))
-
+	m.compTable = table.New(
+		table.WithColumns([]table.Column{
+			{Title: "File", Width: 25}, {Title: "Function", Width: 20}, {Title: "Complexity", Width: 10}, {Title: "Line", Width: 6},
+		}),
+		table.WithFocused(true),
+	)
+	m.depTable = table.New(
+		table.WithColumns([]table.Column{
+			{Title: "Package", Width: 35}, {Title: "Version", Width: 15},
+		}),
+		table.WithFocused(true),
+	)
 	return m
 }
 
@@ -121,274 +108,155 @@ func (m *Model) SetSize(width, height int) {
 
 func (m *Model) Scan() {
 	m.scanning = true
-
 	m.analyzeComplexity()
-	m.analyzeDependencies()
-	m.checkVulnerabilities()
-	m.estimateBundleSize()
-
 	m.updateTables()
 	m.scanning = false
+	m.hasScanned = true
 }
 
 func (m *Model) analyzeComplexity() {
-	m.complexities = []Complexity{}
-
+	m.complexities = nil
 	fset := token.NewFileSet()
-
 	filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err != nil || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		node, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			return nil
 		}
-
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-
-		node, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-		if err != nil {
-			return nil
-		}
-
 		ast.Inspect(node, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.FuncDecl:
-				if x.Name == nil {
-					return true
-				}
-
-				complexity := calculateComplexity(x)
+			if x, ok := n.(*ast.FuncDecl); ok && x.Name != nil {
+				complexity := calcComplexity(x)
 				if complexity > 5 {
-					m.complexities = append(m.complexities, Complexity{
-						File:       filepath.Base(path),
-						Function:   x.Name.Name,
-						Complexity: complexity,
-						Line:       fset.Position(x.Pos()).Line,
-					})
+					m.complexities = append(m.complexities, Complexity{File: filepath.Base(path), Function: x.Name.Name, Complexity: complexity, Line: fset.Position(x.Pos()).Line})
 				}
 			}
 			return true
 		})
-
 		return nil
 	})
-
-	sort.Slice(m.complexities, func(i, j int) bool {
-		return m.complexities[i].Complexity > m.complexities[j].Complexity
-	})
-
-	if len(m.complexities) > 30 {
-		m.complexities = m.complexities[:30]
+	sort.Slice(m.complexities, func(i, j int) bool { return m.complexities[i].Complexity > m.complexities[j].Complexity })
+	if len(m.complexities) > 20 {
+		m.complexities = m.complexities[:20]
 	}
 }
 
-func calculateComplexity(fn *ast.FuncDecl) int {
+func calcComplexity(fn *ast.FuncDecl) int {
 	complexity := 1
 	if fn.Body == nil {
 		return complexity
 	}
-
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch n.(type) {
-		case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt,
-			*ast.CaseClause, *ast.CommClause,
-			*ast.BinaryExpr:
+		case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.CaseClause, *ast.BinaryExpr:
 			complexity++
 		}
 		return true
 	})
-
 	return complexity
 }
 
-func (m *Model) analyzeDependencies() {
-	m.depSizes = []DepSize{}
-
-	data, err := os.ReadFile("go.mod")
-	if err != nil {
-		return
-	}
-
-	lines := strings.Split(string(data), "\n")
-	re := regexp.MustCompile(`^\s*(\S+)\s+v?([\d.]+)`)
-
-	for _, line := range lines {
-		matches := re.FindStringSubmatch(line)
-		if matches != nil {
-			m.depSizes = append(m.depSizes, DepSize{
-				Name:    matches[1],
-				Version: matches[2],
-			})
-		}
-	}
-
-	sort.Slice(m.depSizes, func(i, j int) bool {
-		return m.depSizes[i].Name < m.depSizes[j].Name
-	})
-}
-
-func (m *Model) checkVulnerabilities() {
-	m.vulnerabilities = []SecurityVuln{}
-
-	cmd := exec.Command("govulncheck", "./...")
-	out, err := cmd.Output()
-	if err != nil {
-		return
-	}
-
-	re := regexp.MustCompile(`(\S+)\s+(HIGH|MEDIUM|LOW)\s+(.+?)(?:\s+v(\d+\.\d+\.\d+))?`)
-	lines := strings.Split(string(out), "\n")
-
-	for _, line := range lines {
-		matches := re.FindStringSubmatch(line)
-		if matches != nil {
-			m.vulnerabilities = append(m.vulnerabilities, SecurityVuln{
-				Package:    matches[1],
-				Severity:   matches[2],
-				Title:      matches[3],
-				FixVersion: matches[4],
-			})
-		}
-	}
-}
-
-func (m *Model) estimateBundleSize() {
-	m.bundleSize = 0
-
-	filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-
-		if strings.HasSuffix(path, ".js") || strings.HasSuffix(path, ".ts") ||
-			strings.HasSuffix(path, ".jsx") || strings.HasSuffix(path, ".tsx") {
-			m.bundleSize += info.Size()
-		}
-
-		return nil
-	})
-}
-
 func (m *Model) updateTables() {
-	var compRows []table.Row
+	var rows []table.Row
 	for _, c := range m.complexities {
-		complexity := fmt.Sprintf("%d", c.Complexity)
+		comp := fmt.Sprintf("%d", c.Complexity)
 		if c.Complexity > 20 {
-			complexity = errorStyle.Render(complexity)
+			comp = errorStyle.Render(comp)
 		} else if c.Complexity > 10 {
-			complexity = warningStyle.Render(complexity)
+			comp = warningStyle.Render(comp)
 		}
-
-		compRows = append(compRows, table.Row{
-			c.File,
-			c.Function,
-			complexity,
-			fmt.Sprintf("%d", c.Line),
-		})
+		rows = append(rows, table.Row{c.File, c.Function, comp, fmt.Sprintf("%d", c.Line)})
 	}
-	m.compTable.SetRows(compRows)
-
-	var depRows []table.Row
-	for _, d := range m.depSizes {
-		depRows = append(depRows, table.Row{
-			d.Name,
-			d.Version,
-			"-",
-			"direct",
-		})
-	}
-	m.depTable.SetRows(depRows)
-
-	var vulnRows []table.Row
-	for _, v := range m.vulnerabilities {
-		severity := v.Severity
-		if v.Severity == "HIGH" {
-			severity = errorStyle.Render(severity)
-		} else if v.Severity == "MEDIUM" {
-			severity = warningStyle.Render(severity)
-		}
-
-		vulnRows = append(vulnRows, table.Row{
-			v.Package,
-			severity,
-			truncate(v.Title, 38),
-			v.FixVersion,
-		})
-	}
-	m.vulnTable.SetRows(vulnRows)
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-2] + ".."
+	m.compTable.SetRows(rows)
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.SetSize(msg.Width, msg.Height)
-
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "j", "down":
+		case "1", "2", "3":
+			m.selectedView = int(msg.String()[0] - '1')
+		case "j", "right", "down":
 			m.selectedView = (m.selectedView + 1) % 3
-		case "k", "up":
-			m.selectedView = (m.selectedView - 1 + 3) % 3
-		case "r", "ctrl+r":
+		case "k", "left", "up":
+			m.selectedView = (m.selectedView + 2) % 3
+		case "r":
 			m.Scan()
 		}
-	}
 
-	return m, nil
+		switch m.selectedView {
+		case 0:
+			m.compTable, cmd = m.compTable.Update(msg)
+		case 1:
+			m.depTable, cmd = m.depTable.Update(msg)
+		}
+	}
+	return m, cmd
 }
 
 func (m Model) View() string {
 	if m.scanning {
-		return headerStyle.Render("Code Quality Metrics") + "\n\n" +
-			infoStyle.Render("Analyzing code quality...")
+		return titleStyle.Render("◉ Code Quality") + "\n\n" + infoStyle.Render("Analyzing...")
 	}
-
-	header := headerStyle.Render("Code Quality Metrics")
-
-	highCount := 0
-	for _, c := range m.complexities {
-		if c.Complexity > 20 {
-			highCount++
+	header := titleStyle.Render("◉ Code Quality")
+	stats := ""
+	if m.hasScanned {
+		stats = subtitleStyle.Render(fmt.Sprintf("Complex functions: %d", len(m.complexities)))
+	} else {
+		stats = infoStyle.Render("Press [r] to analyze")
+	}
+	content := m.compTable.View()
+	if m.selectedView == 0 && len(m.complexities) > 0 {
+		highCount := 0
+		for _, c := range m.complexities {
+			if c.Complexity > 20 {
+				highCount++
+			}
 		}
-	}
-
-	stats := fmt.Sprintf("Complex functions: %d | Dependencies: %d | Vulnerabilities: %d | Bundle: %.1fMB",
-		len(m.complexities), len(m.depSizes), len(m.vulnerabilities), float64(m.bundleSize)/1024/1024)
-
-	views := []string{"Complexity", "Dependencies", "Security"}
-	viewIndicator := ""
-	for i, v := range views {
-		if i == m.selectedView {
-			viewIndicator += activeTabStyle.Render(v) + " "
-		} else {
-			viewIndicator += tabStyle.Render(v) + " "
-		}
-	}
-
-	var content string
-	switch m.selectedView {
-	case 0:
-		content = m.compTable.View()
 		if highCount > 0 {
-			content += "\n" + errorStyle.Render("⚠ High complexity detected in "+fmt.Sprintf("%d functions", highCount))
-		}
-	case 1:
-		content = m.depTable.View()
-	case 2:
-		content = m.vulnTable.View()
-		if len(m.vulnerabilities) == 0 {
-			content += "\n" + successStyle.Render("✓ No vulnerabilities detected")
+			content += "\n" + errorStyle.Render("⚠ High complexity: "+fmt.Sprintf("%d", highCount))
 		}
 	}
+	mainContent := fmt.Sprintf("%s\n%s\n%s\n%s", header, stats, content, subtitleStyle.Render("[1]/[2]/[3]: view  ↑/↓: select  r: rescan"))
+	return mainContent
+}
 
-	hint := "\n" + infoStyle.Render("Press 'r' to scan")
+func (m Model) renderNav() string {
+	s := strings.Builder{}
+	for i, v := range m.subViews {
+		indicator := " "
+		if i == m.selectedView {
+			indicator = "▶"
+		}
+		key := lipgloss.NewStyle().Foreground(colors.info).Render("[" + v.Key + "]")
+		var content string
+		if i == m.selectedView {
+			content = lipgloss.NewStyle().Foreground(colors.primary).Bold(true).Render(" " + indicator + " " + key + " " + v.Name)
+		} else {
+			content = lipgloss.NewStyle().Foreground(colors.textSubtle).Render(" " + indicator + " " + key + " " + v.Name)
+		}
+		s.WriteString(content + "\n")
+		descContent := lipgloss.NewStyle().Foreground(colors.textSubtle).Render("   " + v.Description)
+		s.WriteString(descContent + "\n")
+	}
+	return s.String()
+}
 
-	return fmt.Sprintf("%s\n%s\n\n%s\n\n%s\n%s\n", header, stats, viewIndicator, content, hint)
+func stripAnsi(s string) string {
+	result := ""
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\x1b' {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		result += string(s[i])
+	}
+	return result
 }

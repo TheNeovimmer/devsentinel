@@ -18,6 +18,10 @@ import (
 	"devsentinel/cmd/internal/stream"
 )
 
+const (
+	ContentWidth = 80
+)
+
 type Model struct {
 	currentTab int
 	tabs       []Tab
@@ -31,15 +35,16 @@ type Model struct {
 	qualityModel  quality.Model
 	streamModel   stream.Model
 
-	showHelp       bool
-	showCmdPalette bool
+	showHelp   bool
+	firstVisit bool
 
-	spinner spinner.Model
+	spinner   spinner.Model
+	startedAt time.Time
+	loadedAt  time.Time
 
-	startedAt    time.Time
-	lastActivity time.Time
-
-	keys keyBindings
+	keys        keyBindings
+	hasScanned  map[int]bool
+	autoRefresh bool
 }
 
 type Tab struct {
@@ -56,64 +61,40 @@ type keyBindings struct {
 
 var (
 	colors = struct {
-		primary    lipgloss.Color
-		secondary  lipgloss.Color
-		accent     lipgloss.Color
-		success    lipgloss.Color
-		warning    lipgloss.Color
-		error      lipgloss.Color
-		info       lipgloss.Color
-		subtle     lipgloss.Color
-		background lipgloss.Color
-		surface    lipgloss.Color
-		border     lipgloss.Color
+		background  lipgloss.Color
+		surface     lipgloss.Color
+		primary     lipgloss.Color
+		accent      lipgloss.Color
+		success     lipgloss.Color
+		warning     lipgloss.Color
+		error       lipgloss.Color
+		info        lipgloss.Color
+		textPrimary lipgloss.Color
+		textSubtle  lipgloss.Color
 	}{
-		primary:    lipgloss.Color("99"),
-		secondary:  lipgloss.Color("141"),
-		accent:     lipgloss.Color("86"),
-		success:    lipgloss.Color("76"),
-		warning:    lipgloss.Color("226"),
-		error:      lipgloss.Color("196"),
-		info:       lipgloss.Color("75"),
-		subtle:     lipgloss.Color("241"),
-		background: lipgloss.Color("235"),
-		surface:    lipgloss.Color("236"),
-		border:     lipgloss.Color("238"),
+		background:  lipgloss.Color("232"),
+		surface:     lipgloss.Color("235"),
+		primary:     lipgloss.Color("45"),
+		accent:      lipgloss.Color("219"),
+		success:     lipgloss.Color("46"),
+		warning:     lipgloss.Color("208"),
+		error:       lipgloss.Color("196"),
+		info:        lipgloss.Color("75"),
+		textPrimary: lipgloss.Color("254"),
+		textSubtle:  lipgloss.Color("244"),
 	}
 
 	titleStyle = lipgloss.NewStyle().
-			Foreground(colors.accent).
-			Bold(true)
+			Foreground(colors.primary).
+			Bold(true).
+			Align(lipgloss.Center)
 
 	subtitleStyle = lipgloss.NewStyle().
-			Foreground(colors.subtle)
+			Foreground(colors.textSubtle).
+			Align(lipgloss.Center)
 
-	tabActiveStyle = lipgloss.NewStyle().
-			Foreground(colors.accent).
-			Background(colors.surface).
-			Bold(true).
-			Padding(0, 2)
-
-	tabInactiveStyle = lipgloss.NewStyle().
-				Foreground(colors.subtle).
-				Padding(0, 2)
-
-	panelStyle = lipgloss.NewStyle().
-			Background(colors.surface).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colors.border).
-			Padding(1, 2)
-
-	statLabelStyle = lipgloss.NewStyle().
-			Foreground(colors.subtle).
-			Width(14)
-
-	statValueStyle = lipgloss.NewStyle().
-			Foreground(colors.accent).
-			Bold(true)
-
-	keyHintStyle = lipgloss.NewStyle().
-			Foreground(colors.subtle)
+	boxStyle = lipgloss.NewStyle().
+			Foreground(colors.surface)
 
 	helpKeyStyle = lipgloss.NewStyle().
 			Foreground(colors.info).
@@ -124,7 +105,7 @@ var (
 func NewModel() Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(colors.accent)
+	s.Style = lipgloss.NewStyle().Foreground(colors.primary)
 
 	kb := keyBindings{
 		Navigation: []key.Binding{
@@ -132,17 +113,15 @@ func NewModel() Model {
 			key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧+tab", "prev")),
 			key.NewBinding(key.WithKeys("1", "2", "3", "4", "5", "6"), key.WithHelp("1-6", "direct")),
 			key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "home")),
-			key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("↓", "down")),
-			key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("↑", "up")),
+			key.NewBinding(key.WithKeys("left", "right", "j", "k"), key.WithHelp("←/→", "nav")),
 		},
 		Actions: []key.Binding{
-			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "scan")),
 			key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stream")),
-			key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "clear")),
+			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "auto")),
 		},
 		General: []key.Binding{
 			key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-			key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "keys")),
 			key.NewBinding(key.WithKeys("q", "ctrl+c", "esc"), key.WithHelp("q", "quit")),
 		},
 	}
@@ -153,21 +132,23 @@ func NewModel() Model {
 			{"Architecture", "◈", "arch"},
 			{"Runtime", "⚡", "rt"},
 			{"Git", "⎔", "git"},
-			{"Quality", "◉", "quality"},
+			{"Quality", "◉", "qual"},
 			{"Logs", "⏺", "logs"},
 		},
-		ready:          false,
-		showHelp:       false,
-		showCmdPalette: false,
-		spinner:        s,
-		startedAt:      time.Now(),
-		lastActivity:   time.Now(),
-		keys:           kb,
-		analyzerModel:  analyzer.NewModel(),
-		monitorModel:   monitor.NewModel(),
-		gitModel:       git.NewModel(),
-		qualityModel:   quality.NewModel(),
-		streamModel:    stream.NewModel(),
+		ready:         false,
+		showHelp:      false,
+		firstVisit:    true,
+		spinner:       s,
+		startedAt:     time.Now(),
+		loadedAt:      time.Now(),
+		keys:          kb,
+		hasScanned:    make(map[int]bool),
+		autoRefresh:   false,
+		analyzerModel: analyzer.NewModel(),
+		monitorModel:  monitor.NewModel(),
+		gitModel:      git.NewModel(),
+		qualityModel:  quality.NewModel(),
+		streamModel:   stream.NewModel(),
 	}
 }
 
@@ -181,8 +162,22 @@ func (m *Model) SetSize(width, height int) {
 	m.ready = true
 }
 
-func (m *Model) updateActivity() {
-	m.lastActivity = time.Now()
+func (m *Model) scanCurrentTab() {
+	if m.hasScanned[m.currentTab] {
+		return
+	}
+
+	switch m.currentTab {
+	case 1:
+		m.analyzerModel.Analyze(".")
+	case 2:
+		m.monitorModel.Refresh()
+	case 3:
+		m.gitModel.Scan()
+	case 4:
+		m.qualityModel.Scan()
+	}
+	m.hasScanned[m.currentTab] = true
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -191,27 +186,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		m.updateActivity()
-
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 		case "tab":
 			m.currentTab = (m.currentTab + 1) % len(m.tabs)
+			m.scanCurrentTab()
 		case "shift+tab":
 			m.currentTab = (m.currentTab - 1 + len(m.tabs)) % len(m.tabs)
+			m.scanCurrentTab()
 		case "1", "2", "3", "4", "5", "6":
 			m.currentTab = int(msg.String()[0] - '1')
+			m.scanCurrentTab()
 		case "?":
 			m.showHelp = !m.showHelp
-		case "h":
-			m.showCmdPalette = !m.showCmdPalette
 		case "g":
 			m.currentTab = 0
-		case "j", "down":
-			m.currentTab = minInt(m.currentTab+1, len(m.tabs)-1)
-		case "k", "up":
-			m.currentTab = maxInt(m.currentTab-1, 0)
+		case "left", "k":
+			m.currentTab = (m.currentTab - 1 + len(m.tabs)) % len(m.tabs)
+			m.scanCurrentTab()
+		case "right", "j":
+			m.currentTab = (m.currentTab + 1) % len(m.tabs)
+			m.scanCurrentTab()
+		case "r":
+			m.hasScanned = make(map[int]bool)
+			m.scanCurrentTab()
+		case "a":
+			m.autoRefresh = !m.autoRefresh
+		case "s":
+			if m.currentTab == 5 {
+				if m.streamModel.GetStreaming() {
+					m.streamModel.StopStreaming()
+				} else {
+					m.streamModel.StartStreaming()
+				}
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -221,6 +230,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
 	}
+
+	m.loadedAt = time.Now()
 
 	switch m.currentTab {
 	case 0:
@@ -254,8 +265,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	if !m.ready {
-		return m.renderSplash()
+		return m.renderWelcome()
 	}
+
+	m.firstVisit = false
 
 	var content string
 
@@ -277,7 +290,7 @@ func (m Model) View() string {
 	return m.renderLayout(content)
 }
 
-func (m Model) renderSplash() string {
+func (m Model) renderWelcome() string {
 	logo := `
     ██████╗ ███████╗████████╗██████╗  ██████╗ 
     ██╔══██╗██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗
@@ -295,233 +308,234 @@ func (m Model) renderSplash() string {
 
 	s := strings.Builder{}
 	s.WriteString(titleStyle.Render(logo))
+	s.WriteString("\n")
+	s.WriteString(subtitleStyle.Render("Project Intelligence Platform"))
 	s.WriteString("\n\n")
-	s.WriteString(subtitleStyle.Align(lipgloss.Center).Render("Project Intelligence Platform"))
-	s.WriteString("\n\n")
-	s.WriteString(m.spinner.View())
-	s.WriteString(" ")
-	s.WriteString(subtitleStyle.Render("Initializing..."))
+	s.WriteString(lipgloss.NewStyle().Align(lipgloss.Center).Render(m.spinner.View() + "  Loading..."))
 
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Height(m.height).
-		Align(lipgloss.Center, lipgloss.Center).
+		Align(lipgloss.Center).
 		Render(s.String())
+}
+
+func padCenter(text string, width int) string {
+	textLen := len(text)
+	if textLen >= width {
+		return text[:width]
+	}
+	padding := (width - textLen) / 2
+	return strings.Repeat(" ", padding) + text + strings.Repeat(" ", width-textLen-padding)
 }
 
 func (m Model) renderLayout(content string) string {
 	header := m.renderHeader()
-	nav := m.renderNav()
-	main := content
 	footer := m.renderFooter()
 
-	layout := strings.Builder{}
-	layout.WriteString(header)
-	layout.WriteString("\n")
-	layout.WriteString(nav)
-	layout.WriteString("\n")
-	layout.WriteString(main)
-	layout.WriteString("\n")
-	layout.WriteString(footer)
+	layout := header + "\n" + content + "\n" + footer
 
 	if m.showHelp {
-		layout.WriteString("\n")
-		layout.WriteString(m.renderHelp())
+		layout += "\n" + m.renderHelp()
 	}
 
-	if m.showCmdPalette {
-		layout.WriteString("\n")
-		layout.WriteString(m.renderCmdPalette())
-	}
-
-	return layout.String()
+	return layout
 }
 
 func (m Model) renderHeader() string {
 	uptime := time.Since(m.startedAt).Round(time.Second)
 
 	title := titleStyle.Render("DevSentinel")
-	subtitle := subtitleStyle.Render(fmt.Sprintf("v1.0.0 • %s", uptime))
-
-	left := lipgloss.JoinVertical(lipgloss.Left, title, subtitle)
+	subtitle := subtitleStyle.Render(fmt.Sprintf("v1.0.0  •  %s", uptime))
 
 	memStats := &runtime.MemStats{}
 	runtime.ReadMemStats(memStats)
 	memMB := memStats.Alloc / 1024 / 1024
 
-	right := subtitleStyle.Render(
-		fmt.Sprintf("mem: %dMB | goroutines: %d", memMB, runtime.NumGoroutine()),
-	)
-
-	headerWidth := m.width - 4
-
-	return lipgloss.NewStyle().
-		Width(headerWidth).
-		Render(lipgloss.JoinHorizontal(lipgloss.Left, left, right))
-}
-
-func (m Model) renderNav() string {
-	var tabs []string
-
-	maxWidth := m.width - 20
-	currentWidth := 0
-
-	for i, tab := range m.tabs {
-		tabStr := tab.Icon + " " + tab.Name
-		if i == m.currentTab {
-			currentWidth += len(tabStr) + 3
-			tabs = append(tabs, tabActiveStyle.Render(" "+tabStr+" "))
-		} else {
-			currentWidth += len(tabStr) + 3
-			tabs = append(tabs, tabInactiveStyle.Render(" "+tabStr+" "))
-		}
-
-		if currentWidth > maxWidth {
-			break
-		}
+	autoStatus := subtitleStyle.Render("off")
+	if m.autoRefresh {
+		autoStatus = lipgloss.NewStyle().Foreground(colors.success).Bold(true).Render(" on")
 	}
 
-	nav := lipgloss.NewStyle().
-		Width(m.width - 4).
-		Render(lipgloss.JoinHorizontal(0, tabs...))
+	cpuBar := m.renderMiniProgressBar(35, 8)
 
-	currentTabInfo := subtitleStyle.Render(
-		fmt.Sprintf("│ %s ", m.tabs[m.currentTab].Name),
-	)
+	headerContent := fmt.Sprintf("%s  %s  CPU %s  MEM %dMB  auto:%s\n", title, subtitle, cpuBar, memMB, autoStatus)
+	headerContent += m.renderTabBar()
 
-	return nav + currentTabInfo
+	return lipgloss.NewStyle().Width(ContentWidth).Render(headerContent)
+}
+
+func (m Model) renderTabBar() string {
+	s := strings.Builder{}
+	for i, tab := range m.tabs {
+		if i == m.currentTab {
+			s.WriteString(lipgloss.NewStyle().Foreground(colors.primary).Bold(true).Render("[" + tab.Name + "]"))
+		} else {
+			s.WriteString(lipgloss.NewStyle().Foreground(colors.textSubtle).Render(tab.Name))
+		}
+		if i < len(m.tabs)-1 {
+			s.WriteString(" | ")
+		}
+	}
+	s.WriteString("\n")
+	return s.String()
+}
+
+func (m Model) renderMiniProgressBar(percent, width int) string {
+	filled := percent * width / 100
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	color := colors.success
+	if percent > 70 {
+		color = colors.warning
+	}
+	if percent > 90 {
+		color = colors.error
+	}
+	return lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("[%s]%d%%", bar, percent))
+}
+
+func (m Model) renderSidebar() string {
+	s := strings.Builder{}
+
+	for i, tab := range m.tabs {
+		indicator := " "
+		if i == m.currentTab {
+			indicator = "▶"
+		}
+
+		content := ""
+		if i == m.currentTab {
+			content = lipgloss.NewStyle().Foreground(colors.primary).Bold(true).Render(" " + indicator + " " + tab.Icon + " " + tab.Name)
+		} else {
+			content = lipgloss.NewStyle().Foreground(colors.textSubtle).Render(" " + indicator + " " + tab.Icon + " " + tab.Name)
+		}
+
+		s.WriteString(content)
+		s.WriteString("\n")
+	}
+
+	s.WriteString("\n")
+
+	hints := []string{"←/→ navigate", "r: scan", "?: help"}
+	for _, hint := range hints {
+		content := lipgloss.NewStyle().Foreground(colors.textSubtle).Render("  " + hint)
+		s.WriteString(content)
+		s.WriteString("\n")
+	}
+
+	return s.String()
+}
+
+func (m Model) renderMainContent(content string) string {
+	return content
+}
+
+func stripAnsi(s string) string {
+	result := ""
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\x1b' {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		result += string(s[i])
+	}
+	return result
 }
 
 func (m Model) renderFooter() string {
-	keys := []string{
-		helpKeyStyle.Render("tab") + " next",
-		helpKeyStyle.Render("g") + " home",
-		helpKeyStyle.Render("?") + " help",
-		helpKeyStyle.Render("q") + " quit",
-	}
-
-	hint := strings.Join(keys, "  ")
-
-	page := subtitleStyle.Render(
-		fmt.Sprintf("%d / %d", m.currentTab+1, len(m.tabs)),
-	)
-
-	footerWidth := m.width - 4
-
-	return lipgloss.NewStyle().
-		Width(footerWidth).
-		Render(hint + strings.Repeat(" ", 10) + page)
+	hint := "←/→:nav  r:scan  a:auto  ?:help  q:quit"
+	return lipgloss.NewStyle().Width(ContentWidth).Render(hint)
 }
 
 func (m Model) renderDashboard() string {
 	s := strings.Builder{}
 
-	s.WriteString(titleStyle.Render("◈ DevSentinel Dashboard"))
+	s.WriteString(titleStyle.Render("◈ Dashboard"))
 	s.WriteString("\n\n")
 
-	s.WriteString(m.renderStatRow([][2]string{
-		{"Status", "● Running"},
-		{"Uptime", time.Since(m.startedAt).Round(time.Second).String()},
-		{"Platform", runtime.GOOS + "/" + runtime.GOARCH},
-	}))
-	s.WriteString("\n")
-
-	s.WriteString(m.renderStatRow([][2]string{
-		{"Modules", "5 Active"},
-		{"Views", fmt.Sprintf("%d Tabs", len(m.tabs))},
-		{"Go Version", runtime.Version()},
-	}))
+	s.WriteString(m.renderQuickStats())
 	s.WriteString("\n\n")
 
 	s.WriteString(titleStyle.Render("Quick Actions"))
-	s.WriteString("\n\n")
+	s.WriteString("\n")
+	s.WriteString(m.renderQuickActions())
+	s.WriteString("\n")
 
-	actions := panelStyle.Width(m.width - 16).Render(
-		" [1] Architecture    [2] Runtime    [3] Git\n\n" +
-			" [4] Quality         [5] Logs       [6] Settings",
-	)
-	s.WriteString(actions)
-	s.WriteString("\n\n")
+	s.WriteString(titleStyle.Render("Getting Started"))
+	s.WriteString("\n")
+	s.WriteString(m.renderGettingStarted())
 
-	s.WriteString(titleStyle.Render("Navigation"))
-	s.WriteString("\n\n")
-
-	navHelp := panelStyle.Width(m.width - 16).Render(
-		" Tab / ⇧+Tab : Next/Prev    1-6 : Direct    g : Home\n" +
-			" ↑/↓        : Navigate       ?  : Help       q : Quit",
-	)
-	s.WriteString(navHelp)
-
-	return panelStyle.Width(m.width - 8).Render(s.String())
+	return s.String()
 }
 
-func (m Model) renderStatRow(stats [][2]string) string {
-	var row []string
+func (m Model) renderQuickStats() string {
+	stats := [][2]string{
+		{"Status", "● Running"},
+		{"Uptime", time.Since(m.startedAt).Round(time.Second).String()},
+		{"Platform", runtime.GOOS + "/" + runtime.GOARCH},
+		{"Go", runtime.Version()},
+	}
 
+	var rows []string
 	for _, stat := range stats {
-		label := statLabelStyle.Render(stat[0])
+		label := lipgloss.NewStyle().Foreground(colors.textSubtle).Width(10).Render(stat[0])
 
-		valueColor := colors.accent
+		valueColor := colors.primary
 		if stat[1] == "● Running" {
 			valueColor = colors.success
 		}
 
 		value := lipgloss.NewStyle().Foreground(valueColor).Bold(true).Render(stat[1])
 
-		row = append(row, lipgloss.JoinHorizontal(0, label, value))
+		row := label + "   " + value
+		rows = append(rows, row)
 	}
 
-	return strings.Join(row, "    ")
+	return lipgloss.NewStyle().Width(ContentWidth).Align(lipgloss.Center).Render(strings.Join(rows, "    "))
+}
+
+func (m Model) renderQuickActions() string {
+	actions := `
+ [1] Architecture   - Code structure & dependencies
+ [2] Runtime        - System metrics & processes  
+ [3] Git            - Commits, branches & contributors
+ [4] Quality         - Code quality & vulnerabilities
+ [5] Logs           - Live application logs
+
+ Press ←/→ or number to navigate`
+	return lipgloss.NewStyle().Foreground(colors.textSubtle).Width(ContentWidth - 10).Render(actions)
+}
+
+func (m Model) renderGettingStarted() string {
+	guide := `
+ → [r] scan/analyze current view
+ → [a] toggle auto-refresh
+ → [?] keyboard shortcuts
+ → [q] quit`
+	return lipgloss.NewStyle().Foreground(colors.textSubtle).Width(ContentWidth - 10).Render(guide)
 }
 
 func (m Model) renderHelp() string {
 	s := strings.Builder{}
-
 	s.WriteString("\n")
 	s.WriteString(titleStyle.Render("? Keyboard Shortcuts"))
 	s.WriteString("\n\n")
 
-	s.WriteString(panelStyle.Width(m.width - 12).Render(
-		"Navigation                    Actions                      General\n" +
-			"───────────────────────────────────────────────────────────────────────────\n" +
-			" tab      Next tab            r  Refresh/Scan             ?  Toggle help\n" +
-			" ⇧+tab    Previous tab        s  Start/Stop stream        h  Show keys\n" +
-			" 1-6      Direct navigation   c  Clear data              q  Quit\n" +
-			" g        Go to dashboard     ←/→ Navigate lists\n" +
-			" ↑/↓      Navigate            Enter Select",
-	))
-
-	return s.String()
-}
-
-func (m Model) renderCmdPalette() string {
-	s := strings.Builder{}
+	s.WriteString(strings.TrimSpace(`
+ Navigation                    Actions                      General
+─────────────────────────────────────────────────────────────────────────
+ ←/→     Previous/Next tab     r  Scan/Analyze              ?  Toggle help  
+ tab     Next tab             a  Toggle auto-refresh       q  Quit
+ 1-6     Direct navigation    s  Start/Stop stream (Logs)  
+ g       Go to dashboard
+`))
 
 	s.WriteString("\n")
-	s.WriteString(titleStyle.Render("h Command Palette"))
-	s.WriteString("\n\n")
+	s.WriteString(subtitleStyle.Render(" • Views auto-scan when first visited"))
+	s.WriteString("\n")
+	s.WriteString(subtitleStyle.Render(" • Use 'a' for auto-refresh"))
 
-	var allKeys []string
-	allKeys = append(allKeys, "tab: next", "⇧+tab: prev", "1-6: direct", "g: home")
-	allKeys = append(allKeys, "r: refresh", "s: stream", "c: clear")
-	allKeys = append(allKeys, "?: help", "h: keys", "q: quit")
-
-	palette := panelStyle.Width(m.width - 12).Render(strings.Join(allKeys, "  |  "))
-	s.WriteString(palette)
-
-	return s.String()
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
+	return lipgloss.NewStyle().Width(ContentWidth).Render(s.String())
 }

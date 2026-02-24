@@ -14,6 +14,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const (
+	SidebarWidth = 18
+	ContentWidth = 58
+)
+
 type Module struct {
 	Name       string
 	Path       string
@@ -30,6 +35,12 @@ type Dependency struct {
 	Type string
 }
 
+type SubView struct {
+	Name        string
+	Key         string
+	Description string
+}
+
 type Model struct {
 	modules      []Module
 	dependencies []Dependency
@@ -42,51 +53,76 @@ type Model struct {
 	issueTable  table.Model
 	depTable    table.Model
 
+	subViews     []SubView
 	selectedView int
-	ready        bool
-	width        int
-	height       int
 
-	analyzing bool
+	ready  bool
+	width  int
+	height int
+
+	analyzing    bool
+	hasScanned   bool
+	lastScanTime string
 }
 
 var (
-	accentColor    = lipgloss.Color("99")
-	highlightColor = lipgloss.Color("86")
-	warningColor   = lipgloss.Color("226")
-	errorColor     = lipgloss.Color("196")
-	successColor   = lipgloss.Color("76")
-	infoColor      = lipgloss.Color("75")
-	subtleColor    = lipgloss.Color("241")
-	panelColor     = lipgloss.Color("236")
+	colors = struct {
+		background  lipgloss.Color
+		surface     lipgloss.Color
+		primary     lipgloss.Color
+		accent      lipgloss.Color
+		success     lipgloss.Color
+		warning     lipgloss.Color
+		error       lipgloss.Color
+		info        lipgloss.Color
+		textPrimary lipgloss.Color
+		textSubtle  lipgloss.Color
+	}{
+		background:  lipgloss.Color("232"),
+		surface:     lipgloss.Color("235"),
+		primary:     lipgloss.Color("45"),
+		accent:      lipgloss.Color("219"),
+		success:     lipgloss.Color("46"),
+		warning:     lipgloss.Color("208"),
+		error:       lipgloss.Color("196"),
+		info:        lipgloss.Color("75"),
+		textPrimary: lipgloss.Color("254"),
+		textSubtle:  lipgloss.Color("244"),
+	}
 
-	headerStyle = lipgloss.NewStyle().
+	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(highlightColor)
+			Foreground(colors.primary).
+			Align(lipgloss.Center)
 
-	successStyle = lipgloss.NewStyle().
-			Foreground(successColor)
-
-	warningStyle = lipgloss.NewStyle().
-			Foreground(warningColor)
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(errorColor)
+	subtitleStyle = lipgloss.NewStyle().
+			Foreground(colors.textSubtle).
+			Align(lipgloss.Center)
 
 	infoStyle = lipgloss.NewStyle().
-			Foreground(infoColor)
+			Foreground(colors.info).
+			Align(lipgloss.Center)
 
-	tabStyle = lipgloss.NewStyle().
-			Foreground(subtleColor).
-			Padding(0, 1)
+	warningStyle = lipgloss.NewStyle().
+			Foreground(colors.warning)
 
-	activeTabStyle = tabStyle.
-			Foreground(highlightColor).
-			Bold(true)
+	errorStyle = lipgloss.NewStyle().
+			Foreground(colors.error)
+
+	successStyle = lipgloss.NewStyle().
+			Foreground(colors.success)
+
+	boxStyle = lipgloss.NewStyle().
+			Foreground(colors.surface)
 )
 
 func NewModel() Model {
 	m := Model{
+		subViews: []SubView{
+			{"Overview", "1", "Code structure"},
+			{"Issues", "2", "Warnings"},
+			{"Dependencies", "3", "Package deps"},
+		},
 		selectedView: 0,
 	}
 
@@ -97,21 +133,30 @@ func NewModel() Model {
 		{Title: "Complexity", Width: 12},
 		{Title: "Lines", Width: 10},
 	}
-	m.moduleTable = table.New(table.WithColumns(moduleColumns))
+	m.moduleTable = table.New(
+		table.WithColumns(moduleColumns),
+		table.WithFocused(true),
+	)
 
 	issueColumns := []table.Column{
 		{Title: "Severity", Width: 10},
 		{Title: "Issue", Width: 50},
 		{Title: "Location", Width: 30},
 	}
-	m.issueTable = table.New(table.WithColumns(issueColumns))
+	m.issueTable = table.New(
+		table.WithColumns(issueColumns),
+		table.WithFocused(true),
+	)
 
 	depColumns := []table.Column{
 		{Title: "From", Width: 25},
 		{Title: "To", Width: 25},
 		{Title: "Type", Width: 15},
 	}
-	m.depTable = table.New(table.WithColumns(depColumns))
+	m.depTable = table.New(
+		table.WithColumns(depColumns),
+		table.WithFocused(true),
+	)
 
 	return m
 }
@@ -128,6 +173,7 @@ func (m *Model) Analyze(path string) {
 	modules, deps, err := analyzeArchitecture(path)
 	if err != nil {
 		m.issues = append(m.issues, fmt.Sprintf("Error: %v", err))
+		m.analyzing = false
 		return
 	}
 
@@ -140,6 +186,7 @@ func (m *Model) Analyze(path string) {
 
 	m.updateTables()
 	m.analyzing = false
+	m.hasScanned = true
 }
 
 func analyzeArchitecture(root string) ([]Module, []Dependency, error) {
@@ -261,13 +308,13 @@ func detectIssues(modules []Module, deps []Dependency) []string {
 
 	for _, mod := range modules {
 		if mod.Lines > 10000 {
-			issues = append(issues, fmt.Sprintf("[%s] %s has %d lines - consider splitting", warningStyle.Render("WARNING"), mod.Name, mod.Lines))
+			issues = append(issues, fmt.Sprintf("[%s] %s has %d lines", warningStyle.Render("WARNING"), mod.Name, mod.Lines))
 		}
 		if mod.Complexity > 100 {
-			issues = append(issues, fmt.Sprintf("[%s] %s has complexity %d - refactor needed", warningStyle.Render("WARNING"), mod.Name, mod.Complexity))
+			issues = append(issues, fmt.Sprintf("[%s] %s complexity %d", warningStyle.Render("WARNING"), mod.Name, mod.Complexity))
 		}
 		if mod.Functions > 50 {
-			issues = append(issues, fmt.Sprintf("[%s] %s has %d functions - consider splitting", warningStyle.Render("WARNING"), mod.Name, mod.Functions))
+			issues = append(issues, fmt.Sprintf("[%s] %s has %d functions", warningStyle.Render("WARNING"), mod.Name, mod.Functions))
 		}
 	}
 
@@ -280,7 +327,7 @@ func detectIssues(modules []Module, deps []Dependency) []string {
 
 	for dep, count := range depCounts {
 		if count > 10 {
-			issues = append(issues, fmt.Sprintf("[%s] %s has %d incoming dependencies - potential bottleneck", infoStyle.Render("INFO"), dep, count))
+			issues = append(issues, fmt.Sprintf("[%s] %s has %d deps", infoStyle.Render("INFO"), dep, count))
 		}
 	}
 
@@ -289,7 +336,6 @@ func detectIssues(modules []Module, deps []Dependency) []string {
 
 func findCircularDeps(deps []Dependency) [][]string {
 	var circles [][]string
-
 	type pair struct{ from, to string }
 	edges := make(map[pair]bool)
 	nodes := make(map[string]bool)
@@ -317,10 +363,8 @@ func findCircularDeps(deps []Dependency) [][]string {
 				}
 				return false
 			}
-
 			visited[current] = true
 			path = append(path, current)
-
 			for n := range nodes {
 				if edges[pair{current, n}] {
 					if dfs(n) {
@@ -328,7 +372,6 @@ func findCircularDeps(deps []Dependency) [][]string {
 					}
 				}
 			}
-
 			path = path[:len(path)-1]
 			return false
 		}
@@ -341,45 +384,35 @@ func findCircularDeps(deps []Dependency) [][]string {
 
 func findLargeFiles(root string) []string {
 	var largeFiles []string
-
 	filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
-
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-
 		if info.Size() > 5000 {
 			largeFiles = append(largeFiles, fmt.Sprintf("%s (%dkB)", path, info.Size()/1000))
 		}
-
 		return nil
 	})
-
 	return largeFiles
 }
 
 func findDeadCode(root string) []string {
 	var deadCode []string
-
 	filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
-
 		if strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-
 		if info.Size() < 100 {
 			deadCode = append(deadCode, path)
 		}
-
 		return nil
 	})
-
 	return deadCode
 }
 
@@ -401,8 +434,6 @@ func (m *Model) updateTables() {
 		severity := "INFO"
 		if strings.Contains(issue, "WARNING") {
 			severity = "WARNING"
-		} else if strings.Contains(issue, "ERROR") {
-			severity = "ERROR"
 		}
 		parts := strings.SplitN(issue, "]", 2)
 		location := ""
@@ -421,40 +452,58 @@ func (m *Model) updateTables() {
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.SetSize(msg.Width, msg.Height)
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "j", "down":
-			m.selectedView = (m.selectedView + 1) % 3
-		case "k", "up":
-			m.selectedView = (m.selectedView - 1 + 3) % 3
+		case "1":
+			m.selectedView = 0
+		case "2":
+			m.selectedView = 1
+		case "3":
+			m.selectedView = 2
+		case "j", "down", "right":
+			m.selectedView = (m.selectedView + 1) % len(m.subViews)
+		case "k", "up", "left":
+			m.selectedView = (m.selectedView - 1 + len(m.subViews)) % len(m.subViews)
 		case "r":
 			m.Analyze(".")
+		}
+
+		switch m.selectedView {
+		case 0:
+			m.moduleTable, cmd = m.moduleTable.Update(msg)
+		case 1:
+			m.issueTable, cmd = m.issueTable.Update(msg)
+		case 2:
+			m.depTable, cmd = m.depTable.Update(msg)
 		}
 
 	case struct{}:
 		m.analyzing = false
 	}
 
-	return m, nil
+	return m, cmd
 }
 
 func (m Model) View() string {
-	header := headerStyle.Render("◈ Architecture Analyzer")
-	stats := fmt.Sprintf("Modules: %d | Dependencies: %d | Issues: %d",
-		len(m.modules), len(m.dependencies), len(m.issues))
+	if m.analyzing {
+		return titleStyle.Render("◈ Architecture") + "\n\n" +
+			infoStyle.Render("Scanning code structure...")
+	}
 
-	views := []string{"Modules", "Issues", "Dependencies"}
-	viewIndicator := ""
-	for i, v := range views {
-		if i == m.selectedView {
-			viewIndicator += activeTabStyle.Render(" "+v+" ") + " "
-		} else {
-			viewIndicator += tabStyle.Render(" "+v+" ") + " "
-		}
+	header := titleStyle.Render("◈ Architecture")
+
+	stats := ""
+	if m.hasScanned {
+		stats = subtitleStyle.Render(fmt.Sprintf("Modules: %d  |  Deps: %d  |  Issues: %d",
+			len(m.modules), len(m.dependencies), len(m.issues)))
+	} else {
+		stats = infoStyle.Render("Press [r] to scan")
 	}
 
 	var content string
@@ -467,14 +516,56 @@ func (m Model) View() string {
 		content = m.depTable.View()
 	}
 
-	legend := "\n" + warningStyle.Render("Legend: ") +
-		successStyle.Render("Low ") +
-		warningStyle.Render("Medium ") +
-		errorStyle.Render("High")
+	legend := ""
+	if len(m.issues) > 0 {
+		legend = "\n" + warningStyle.Render("Warnings: ") + fmt.Sprintf("%d", len(m.issues))
+	}
 
-	hint := "\n" + infoStyle.Render("Press 'r' to analyze | j/k to switch views")
+	mainContent := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", header, stats, content, legend, subtitleStyle.Render("[1]/[2]/[3]: view  ↑/↓: select  r: rescan"))
 
-	return fmt.Sprintf("%s\n%s\n\n%s\n\n%s\n%s\n%s\n", header, stats, viewIndicator, content, legend, hint)
+	return mainContent
+}
+
+func (m Model) renderNav() string {
+	s := strings.Builder{}
+
+	for i, v := range m.subViews {
+		indicator := " "
+		if i == m.selectedView {
+			indicator = "▶"
+		}
+
+		key := lipgloss.NewStyle().Foreground(colors.info).Render("[" + v.Key + "]")
+		content := ""
+		if i == m.selectedView {
+			content = lipgloss.NewStyle().Foreground(colors.primary).Bold(true).Render(" " + indicator + " " + key + " " + v.Name)
+		} else {
+			content = lipgloss.NewStyle().Foreground(colors.textSubtle).Render(" " + indicator + " " + key + " " + v.Name)
+		}
+
+		s.WriteString(content)
+		s.WriteString("\n")
+
+		descContent := lipgloss.NewStyle().Foreground(colors.textSubtle).Render("   " + v.Description)
+		s.WriteString(descContent)
+		s.WriteString("\n")
+	}
+
+	return s.String()
+}
+
+func stripAnsi(s string) string {
+	result := ""
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\x1b' {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		result += string(s[i])
+	}
+	return result
 }
 
 func min(a, b int) int {
