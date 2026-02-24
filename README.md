@@ -44,23 +44,34 @@ A modern, all-in-one Terminal User Interface (TUI) for project intelligence - co
 # Run the binary
 ./devsentinel
 
-# Or install from source
-go install github.com/yourusername/devsentinel@latest
+# Or build from source
+go build -o devsentinel ./cmd
 ```
+
+## 📺 UI Overview
+
+DevSentinel features a simple, borderless layout:
+
+- **Header**: Shows app name, version, CPU/Memory stats, and tab bar
+- **Content**: Interactive tables for each module
+- **Footer**: Keyboard shortcut hints
+
+Use `↑`/`↓` to navigate table rows, `1`/`2`/`3` to switch views within tabs.
 
 ## ⌨️ Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Next/Previous tab |
-| `1-6` | Direct navigation |
+| `←` / `→` or `j` / `k` | Previous/Next tab |
+| `1-6` | Direct navigation to tab |
 | `g` | Go to dashboard |
-| `↑` / `↓` | Navigate lists |
+| `↑` / `↓` | Navigate rows in tables |
+| `1` / `2` / `3` | Switch sub-view within tab |
 | `r` | Refresh/Scan data |
 | `s` | Start/Stop log stream |
-| `c` | Clear data |
+| `a` | Toggle auto-refresh |
+| `c` | Clear logs |
 | `?` | Toggle help |
-| `h` | Show shortcuts |
 | `q` | Quit |
 
 ## 🛠️ Requirements
@@ -113,12 +124,13 @@ go install github.com/yourusername/devsentinel@latest
 
 DevSentinel uses a modern dark theme with:
 
-- **Primary**: Green (#86)
-- **Accent**: Purple (#99)
-- **Success**: Green (#76)
-- **Warning**: Yellow (#226)
+- **Primary**: Cyan (#45)
+- **Accent**: Pink (#219)
+- **Success**: Green (#46)
+- **Warning**: Orange (#208)
 - **Error**: Red (#196)
-- **Info**: Cyan (#75)
+- **Info**: Light Blue (#75)
+- **Background**: Dark (#232)
 
 ## 🏗️ Architecture
 
